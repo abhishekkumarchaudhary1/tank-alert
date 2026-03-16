@@ -33,6 +33,14 @@ function TankAlertDemo() {
     if (!("Notification" in window)) setPermission("denied");
   }, []);
 
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (!("serviceWorker" in navigator)) return;
+    void navigator.serviceWorker.register("/sw.js").catch(() => {
+      // Ignore: notifications can still work without SW on some browsers
+    });
+  }, []);
+
   async function requestPermission() {
     if (typeof window === "undefined") return;
     if (!("Notification" in window)) return;
@@ -72,6 +80,26 @@ function TankAlertDemo() {
     }, 1200);
   }
 
+  async function showLocalNotification(title: string, options: NotificationOptions) {
+    if (typeof window === "undefined") return;
+    if (!("Notification" in window)) return;
+    if (Notification.permission !== "granted") return;
+
+    // Desktop Chrome etc.
+    try {
+      // eslint-disable-next-line no-new
+      new Notification(title, options);
+      return;
+    } catch {
+      // Some mobile browsers throw "Illegal constructor" here and require SW notifications.
+    }
+
+    if (!("serviceWorker" in navigator)) return;
+    const reg = (await navigator.serviceWorker.getRegistration()) ?? (await navigator.serviceWorker.ready.catch(() => null));
+    if (!reg) return;
+    await reg.showNotification(title, options);
+  }
+
   async function poll() {
     setError(null);
     try {
@@ -83,12 +111,10 @@ function TankAlertDemo() {
       if (data.lastSeen && data.lastSeen !== lastNotifiedHeartbeatAt) {
         setLastNotifiedHeartbeatAt(data.lastSeen);
 
-        if (permission === "granted") {
-          new Notification("Tank Alert", {
-            body: `Heartbeat received from ${data.device}`,
-            tag: "tank-alert-heartbeat",
-          });
-        }
+        await showLocalNotification("Tank Alert", {
+          body: `Heartbeat received from ${data.device}`,
+          tag: "tank-alert-heartbeat",
+        });
 
         await playAlarm();
       }
