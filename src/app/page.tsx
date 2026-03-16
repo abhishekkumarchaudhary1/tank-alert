@@ -117,9 +117,9 @@ function TankAlertDemo() {
       <div className="mx-auto flex max-w-3xl flex-col gap-6 px-6 py-10">
         <header className="flex flex-col gap-2">
           <p className="text-sm font-medium text-zinc-600 dark:text-zinc-400">Tank Alert (test mode)</p>
-          <h1 className="text-3xl font-semibold tracking-tight">Minute notification + alarm</h1>
+          <h1 className="text-3xl font-semibold tracking-tight">Heartbeat alerts + alarm</h1>
           <p className="text-zinc-600 dark:text-zinc-400">
-            This listens for real heartbeats from your NodeMCU (via HTTP POST) and alerts only when a heartbeat is received.
+            This listens for real heartbeats from your NodeMCU (via HTTP POST) and alerts only when a new heartbeat is received.
           </p>
         </header>
 
