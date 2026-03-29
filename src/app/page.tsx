@@ -1,12 +1,15 @@
 "use client";
 
 import { useEffect, useState, useRef, useCallback } from "react";
+import { useRouter } from "next/navigation";
 
 const POLL_MS = 5000;
 const STALE_MS = 30_000;
 const MUTE_MS = 10 * 60 * 1000;
 
 type ApiData = { device: string; lastSeen: string | null; serverTime: string };
+type UserData = { email: string; role: string; approved: boolean };
+type MotorLog = { email: string; timestamp: string };
 
 /* ── audio ────────────────────────────────────────────────── */
 
@@ -16,12 +19,10 @@ function playBeeps(count: number) {
     (window as unknown as { webkitAudioContext?: typeof AudioContext })
       .webkitAudioContext;
   if (!Ctor) return;
-
   const ctx = new Ctor();
   const gain = ctx.createGain();
   gain.gain.value = 0.03 + (count / 10) * 0.12;
   gain.connect(ctx.destination);
-
   const freq = 660 + (count / 10) * 440;
   for (let i = 0; i < count; i++) {
     const osc = ctx.createOscillator();
@@ -32,7 +33,6 @@ function playBeeps(count: number) {
     osc.start(t);
     osc.stop(t + 0.12);
   }
-
   setTimeout(() => void ctx.close(), count * 200 + 500);
 }
 
@@ -42,14 +42,12 @@ async function sendNotification(title: string, body: string) {
   if (typeof window === "undefined") return;
   if (!("Notification" in window) || Notification.permission !== "granted")
     return;
-
   try {
     new Notification(title, { body, tag: "tank-alert" });
     return;
   } catch {
-    /* mobile browsers require SW */
+    /* mobile SW fallback */
   }
-
   const reg = await navigator.serviceWorker?.getRegistration();
   reg?.showNotification(title, { body, tag: "tank-alert" });
 }
@@ -97,8 +95,6 @@ function WaterDrop({ color }: { color: "red" | "amber" | "emerald" }) {
     color === "red" ? "#fca5a5" : color === "amber" ? "#fcd34d" : "#6ee7b7";
   const stroke =
     color === "red" ? "#ef4444" : color === "amber" ? "#f59e0b" : "#10b981";
-  const showLevel = color !== "emerald";
-
   return (
     <svg width="72" height="72" viewBox="0 0 100 120" fill="none">
       <path
@@ -107,7 +103,7 @@ function WaterDrop({ color }: { color: "red" | "amber" | "emerald" }) {
         stroke={stroke}
         strokeWidth="3"
       />
-      {showLevel && (
+      {color !== "emerald" && (
         <>
           <line
             x1="30"
@@ -143,14 +139,21 @@ function WaterDrop({ color }: { color: "red" | "amber" | "emerald" }) {
 /* ── main ─────────────────────────────────────────────────── */
 
 export default function Home() {
+  const router = useRouter();
+
+  /* auth */
+  const [user, setUser] = useState<UserData | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+
+  /* tank */
   const [lastSeen, setLastSeen] = useState<string | null>(null);
   const [serverTime, setServerTime] = useState<string | null>(null);
   const [device, setDevice] = useState("nodemcu-terrace-1");
   const [mutedUntil, setMutedUntil] = useState(0);
   const [countdown, setCountdown] = useState("");
-  const [permission, setPermission] = useState<NotificationPermission>(
-    "default",
-  );
+  const [permission, setPermission] =
+    useState<NotificationPermission>("default");
+  const [lastMotorOff, setLastMotorOff] = useState<MotorLog | null>(null);
 
   const didNotify = useRef(false);
   const round = useRef(0);
@@ -170,13 +173,25 @@ export default function Home() {
       : "red"
     : "emerald";
 
-  /* register SW + check permission */
+  /* fetch user */
+  useEffect(() => {
+    fetch("/api/auth/me")
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.email) setUser(d);
+        else router.push("/login");
+      })
+      .catch(() => router.push("/login"))
+      .finally(() => setAuthLoading(false));
+  }, [router]);
+
+  /* SW + notification */
   useEffect(() => {
     navigator.serviceWorker?.register("/sw.js").catch(() => {});
     if ("Notification" in window) setPermission(Notification.permission);
   }, []);
 
-  /* poll server */
+  /* poll heartbeat */
   const poll = useCallback(async () => {
     try {
       const r = await fetch("/api/heartbeat", { cache: "no-store" });
@@ -185,15 +200,25 @@ export default function Home() {
       setLastSeen(d.lastSeen);
       setServerTime(d.serverTime);
     } catch {
-      /* network hiccup, retry next interval */
+      /* retry next tick */
     }
   }, []);
 
   useEffect(() => {
+    if (!user?.approved) return;
     void poll();
     const id = setInterval(() => void poll(), POLL_MS);
     return () => clearInterval(id);
-  }, [poll]);
+  }, [poll, user?.approved]);
+
+  /* fetch motor log */
+  useEffect(() => {
+    if (!user?.approved) return;
+    fetch("/api/motor-off")
+      .then((r) => r.json())
+      .then((d) => setLastMotorOff(d.lastOff ?? null))
+      .catch(() => {});
+  }, [user?.approved]);
 
   /* mute countdown */
   useEffect(() => {
@@ -208,30 +233,28 @@ export default function Home() {
         setCountdown("");
         return;
       }
-      const m = Math.floor(r / 60000);
-      const s = Math.floor((r % 60000) / 1000);
-      setCountdown(`${m}:${String(s).padStart(2, "0")}`);
+      setCountdown(
+        `${Math.floor(r / 60000)}:${String(Math.floor((r % 60000) / 1000)).padStart(2, "0")}`,
+      );
     };
     tick();
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
   }, [isMuted, mutedUntil]);
 
-  /* alarm helpers (use refs so setTimeout closures stay valid) */
+  /* alarm */
   function nextRound() {
     if (!alarming.current) return;
     round.current = Math.min(round.current + 1, 10);
     playBeeps(round.current);
     alarmTimer.current = setTimeout(nextRound, round.current * 200 + 1500);
   }
-
   function startAlarm() {
     if (alarming.current) return;
     alarming.current = true;
     round.current = 0;
     nextRound();
   }
-
   function stopAlarm() {
     alarming.current = false;
     round.current = 0;
@@ -240,6 +263,7 @@ export default function Home() {
 
   /* react to tank status */
   useEffect(() => {
+    if (!user?.approved) return;
     if (isFull && !isMuted) {
       if (!alarming.current) startAlarm();
       if (!didNotify.current) {
@@ -255,22 +279,104 @@ export default function Home() {
     if (!isFull) didNotify.current = false;
     return () => stopAlarm();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isFull, isMuted]);
+  }, [isFull, isMuted, user?.approved]);
 
-  function mute() {
+  async function mute() {
     stopAlarm();
     setMutedUntil(Date.now() + MUTE_MS);
     didNotify.current = true;
+    try {
+      await fetch("/api/motor-off", { method: "POST" });
+      const r = await fetch("/api/motor-off");
+      const d = await r.json();
+      setLastMotorOff(d.lastOff ?? null);
+    } catch {
+      /* ignore */
+    }
   }
 
-  /* ── render ───────────────────────────────────────────── */
+  async function logout() {
+    await fetch("/api/auth/logout", { method: "POST" });
+    router.push("/login");
+  }
 
+  /* ── loading ── */
+  if (authLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-zinc-50 dark:bg-black">
+        <p className="text-zinc-500">Loading&hellip;</p>
+      </div>
+    );
+  }
+  if (!user) return null;
+
+  /* ── pending approval ── */
+  if (!user.approved) {
+    return (
+      <div className="min-h-screen bg-gradient-to-b from-zinc-50 to-zinc-100 dark:from-zinc-950 dark:to-black flex items-center justify-center p-4">
+        <div className="w-full max-w-sm flex flex-col items-center gap-5 text-center">
+          <svg
+            width="64"
+            height="64"
+            viewBox="0 0 100 120"
+            fill="none"
+            className="opacity-50"
+          >
+            <path
+              d="M50 8C50 8 12 52 12 72C12 93 29 110 50 110C71 110 88 93 88 72C88 52 50 8 50 8Z"
+              fill="#fcd34d"
+              stroke="#f59e0b"
+              strokeWidth="3"
+            />
+          </svg>
+          <h1 className="text-xl font-bold text-zinc-800 dark:text-zinc-200">
+            Pending Approval
+          </h1>
+          <p className="text-sm text-zinc-600 dark:text-zinc-400">
+            Your account ({user.email}) is awaiting admin approval.
+            <br />
+            You&rsquo;ll get access once the admin approves you.
+          </p>
+          <button
+            onClick={logout}
+            className="text-sm text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300"
+            type="button"
+          >
+            Sign out
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  /* ── main UI ── */
   return (
-    <div className="min-h-screen bg-gradient-to-b from-zinc-50 to-zinc-100 dark:from-zinc-950 dark:to-black flex items-center justify-center p-4">
-      <div className="w-full max-w-sm flex flex-col gap-5">
-        <p className="text-center text-lg font-semibold tracking-tight text-zinc-800 dark:text-zinc-200">
-          Tank Alert
-        </p>
+    <div className="min-h-screen bg-gradient-to-b from-zinc-50 to-zinc-100 dark:from-zinc-950 dark:to-black">
+      <div className="mx-auto max-w-sm px-4 py-6 flex flex-col gap-5">
+        {/* header */}
+        <div className="flex items-center justify-between">
+          <p className="text-lg font-semibold text-zinc-800 dark:text-zinc-200">
+            Tank Alert
+          </p>
+          <div className="flex items-center gap-2">
+            {user.role === "super_admin" && (
+              <button
+                onClick={() => router.push("/admin")}
+                className="rounded-lg border border-zinc-200 dark:border-zinc-700 px-2.5 py-1 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
+                type="button"
+              >
+                Admin
+              </button>
+            )}
+            <button
+              onClick={logout}
+              className="rounded-lg border border-zinc-200 dark:border-zinc-700 px-2.5 py-1 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
+              type="button"
+            >
+              Logout
+            </button>
+          </div>
+        </div>
 
         {/* status card */}
         <div
@@ -285,7 +391,6 @@ export default function Home() {
           <div className={isFull && !isMuted ? "animate-pulse" : ""}>
             <WaterDrop color={color} />
           </div>
-
           <div>
             <p
               className={`text-xl font-bold ${
@@ -321,12 +426,18 @@ export default function Home() {
                 "Last signal",
                 lastSeen ? new Date(lastSeen).toLocaleTimeString() : "\u2014",
               ],
-              ["Notifications", permission],
+              [
+                "Motor last off",
+                lastMotorOff
+                  ? `${new Date(lastMotorOff.timestamp).toLocaleString()} by ${lastMotorOff.email}`
+                  : "\u2014",
+              ],
+              ["Signed in as", user.email],
             ] as const
           ).map(([label, value]) => (
-            <div key={label} className="flex justify-between px-4 py-3">
-              <span className="text-sm text-zinc-500">{label}</span>
-              <span className="text-sm font-medium text-zinc-800 dark:text-zinc-200">
+            <div key={label} className="flex justify-between px-4 py-3 gap-2">
+              <span className="text-sm text-zinc-500 shrink-0">{label}</span>
+              <span className="text-sm font-medium text-zinc-800 dark:text-zinc-200 text-right truncate">
                 {value}
               </span>
             </div>
